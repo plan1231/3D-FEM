@@ -7,7 +7,16 @@ subdomains. On a mac, simply run
 ```
 brew install metis
 ```
+## Source code
+All code lives under `/src`. 
 
+`main.cpp` contains the bulk of the implementation,
+from the Additive Schwarz Preconditioner to the simulation steps using implicit
+Euler integration.
+
+`domain_partitioning.cpp` contains the code for decomposing an input mesh (which
+has to be a tetrahedron) into overlapping subdomains. We then build the restriction
+and extension matrices for each subdomain.
 
 ## Compile
 

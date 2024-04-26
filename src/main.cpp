@@ -19,47 +19,51 @@
 #define TIMESTEP 0.1
 #define ALPHA 5.0
 
-class ASMPreconditioner {
+class ASMPreconditioner
+{
 public:
-
     using MatrixType = Eigen::SparseMatrix<double>;
 
-    Eigen::VectorXd solve(const Eigen::VectorXd& rhs) const {
-       return matrix * rhs;
+    Eigen::VectorXd solve(const Eigen::VectorXd &rhs) const
+    {
+        return matrix * rhs;
     }
 
-    Eigen::ComputationInfo info() const {
+    Eigen::ComputationInfo info() const
+    {
         return preconditioner_computed ? Eigen::Success : Eigen::NumericalIssue;
     }
 
-   
-    void loadPartitions(std::vector<PartitionOperators>&& operators) {
+    void loadPartitions(std::vector<PartitionOperators> &&operators)
+    {
         this->operators = std::move(operators);
     }
 
-    void compute(const MatrixType& A) {
-         // Create an identity matrix of the same size as 'matrix'
-    
+    void compute(const MatrixType &A)
+    {
+        // Create an identity matrix of the same size as 'matrix'
+
         Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
         matrix.resize(A.rows(), A.cols());
         matrix.setZero();
 
-        for(const auto& op : operators) {
-            MatrixType localA = op.R * A * op.E;  
-            std::cout << "Local A: " << localA.rows() << "x" << localA.cols() << std::endl;
-            std::cout << localA << std::endl;
+        for (const auto &op : operators)
+        {
+            MatrixType localA = op.R * A * op.E;
             Eigen::SparseMatrix<double> identity(localA.rows(), localA.cols());
             identity.setIdentity();
 
             // Setup and solve using SparseLU
-            solver.analyzePattern(localA);  
+            solver.analyzePattern(localA);
             solver.factorize(localA);
-            if(solver.info() != Eigen::Success) {
+            if (solver.info() != Eigen::Success)
+            {
                 throw std::runtime_error("Local decomposition failed!");
             }
 
             Eigen::SparseMatrix<double> localInverse = solver.solve(identity);
-            if(solver.info() != Eigen::Success) {
+            if (solver.info() != Eigen::Success)
+            {
                 throw std::runtime_error("Local inversion failed!");
             }
 
@@ -77,13 +81,12 @@ private:
     bool preconditioner_computed = false;
 };
 
-
-
 namespace fs = std::filesystem;
 
 void tetrahedron_stiffness(Eigen::Matrix<double, 4, 4> &Ke, double volume,
-                           const Eigen::Ref<const Eigen::RowVector4i>& element,
-                           const Eigen::Ref<const Eigen::MatrixXd> V) {
+                           const Eigen::Ref<const Eigen::RowVector4i> &element,
+                           const Eigen::Ref<const Eigen::MatrixXd> V)
+{
 
     // Extract vertices of the tetrahedron
     Eigen::Vector3d X0 = V.row(element(0)).transpose();
@@ -128,12 +131,14 @@ void tetrahedron_stiffness(Eigen::Matrix<double, 4, 4> &Ke, double volume,
     Ke(3, 3) = volume * N3.dot(N3);
 }
 
-void tetrahedron_mass(Eigen::Matrix<double, 4, 4> &Me, double volume) {
+void tetrahedron_mass(Eigen::Matrix<double, 4, 4> &Me, double volume)
+{
     Me.setConstant(volume / 20.0);
     Me.diagonal().setConstant(volume / 10.0);
 }
 
-double tetrahedron_volume(const Eigen::Vector3d& X0, const Eigen::Vector3d& X1, const Eigen::Vector3d& X2, const Eigen::Vector3d& X3) {
+double tetrahedron_volume(const Eigen::Vector3d &X0, const Eigen::Vector3d &X1, const Eigen::Vector3d &X2, const Eigen::Vector3d &X3)
+{
     Eigen::Vector3d AB = X1 - X0;
     Eigen::Vector3d AC = X2 - X0;
     Eigen::Vector3d AD = X3 - X0;
@@ -141,16 +146,17 @@ double tetrahedron_volume(const Eigen::Vector3d& X0, const Eigen::Vector3d& X1, 
     return volume;
 }
 
-int main() {
+int main()
+{
     // Load geometric data
     Eigen::MatrixXd surfaceV, V; // Vertices
-    Eigen::MatrixXi T; // Tetrahedrons (connectivity)
-    Eigen::MatrixXi surfaceF,F; // Faces
+    Eigen::MatrixXi T;           // Tetrahedrons (connectivity)
+    Eigen::MatrixXi surfaceF, F; // Faces
 
     igl::readOBJ("../data/armadillo.obj", surfaceV, surfaceF);
-    igl::copyleft::tetgen::tetrahedralize(surfaceV, surfaceF,"pq1.414Y", V,T,F);
+    igl::copyleft::tetgen::tetrahedralize(surfaceV, surfaceF, "pq1.414Y", V, T, F);
 
-//    igl::readMESH("../data/coarser_bunny.mesh", V, T, F);
+    //    igl::readMESH("../data/coarser_bunny.mesh", V, T, F);
 
     igl::boundary_facets(T, surfaceF);
     surfaceF = surfaceF.rowwise().reverse().eval();
@@ -162,62 +168,71 @@ int main() {
     Eigen::SparseMatrix<double> M(Nv, Nv);
     K.resize(Nv, Nv);
     M.resize(Nv, Nv);
-    Eigen::Matrix<double, 4, 4> Ke, Me;
-    #pragma omp parallel for num_threads(4)
-    for (int tet_idx = 0; tet_idx < Ne; ++tet_idx) {
-        double volume = tetrahedron_volume(V.row(T(tet_idx, 0)), V.row(T(tet_idx, 1)),
-                                           V.row(T(tet_idx, 2)), V.row(T(tet_idx, 3)));
+    #pragma omp parallel 
+    {
+        Eigen::SparseMatrix<double> K_local(Nv, Nv);
+        Eigen::SparseMatrix<double> M_local(Nv, Nv);
+        K_local.resize(Nv, Nv);
+        M_local.resize(Nv, Nv);
+        #pragma omp for
+        for (int tet_idx = 0; tet_idx < Ne; ++tet_idx)
+        {
+            Eigen::Matrix<double, 4, 4> Ke, Me;
 
-        auto indices = T.row(tet_idx);
+            double volume = tetrahedron_volume(V.row(T(tet_idx, 0)), V.row(T(tet_idx, 1)),
+                                            V.row(T(tet_idx, 2)), V.row(T(tet_idx, 3)));
 
-        tetrahedron_stiffness(Ke, volume, indices, V);
-        tetrahedron_mass(Me, volume);
+            auto indices = T.row(tet_idx);
 
-        for (int ti = 0; ti < 4; ++ti) {
+            tetrahedron_stiffness(Ke, volume, indices, V);
+            tetrahedron_mass(Me, volume);
 
-            for (int tj = 0; tj < 4; ++tj) {
-                #pragma omp atomic
-                K.coeffRef(indices(ti), indices(tj)) += Ke.coeff(ti, tj);
-                #pragma omp atomic
-                M.coeffRef(indices(ti), indices(tj)) += Me.coeff(ti, tj);
+            for (int ti = 0; ti < 4; ++ti)
+            {
+
+                for (int tj = 0; tj < 4; ++tj)
+                {
+                    K_local.coeffRef(indices(ti), indices(tj)) += Ke.coeff(ti, tj);
+                    M_local.coeffRef(indices(ti), indices(tj)) += Me.coeff(ti, tj);
+                }
             }
         }
+        #pragma omp critical
+        {
+            K += K_local;
+            M += M_local;
+        }
     }
-
     K.makeCompressed();
     M.makeCompressed();
 
     igl::embree::EmbreeRenderer er;
     er.set_mesh(V, surfaceF, true);
     Eigen::Matrix3d rot_matrix;
-// Specify rotation matrix:
-//     10 degrees around X axis
-//      5 degrees around Y axis
-//      4 degrees around Z axis
-    rot_matrix =  Eigen::AngleAxisd( 10*igl::PI/180.0, Eigen::Vector3d::UnitX())
-                  * Eigen::AngleAxisd(  5*igl::PI/180.0, Eigen::Vector3d::UnitY())
-                  * Eigen::AngleAxisd(  4*igl::PI/180.0, Eigen::Vector3d::UnitZ());
+    // Specify rotation matrix:
+    //     10 degrees around X axis
+    //      5 degrees around Y axis
+    //      4 degrees around Z axis
+    rot_matrix = Eigen::AngleAxisd(10 * igl::PI / 180.0, Eigen::Vector3d::UnitX()) * Eigen::AngleAxisd(5 * igl::PI / 180.0, Eigen::Vector3d::UnitY()) * Eigen::AngleAxisd(4 * igl::PI / 180.0, Eigen::Vector3d::UnitZ());
     er.set_rot(rot_matrix);
 
     // create output directory if not exists
     fs::path dir = "result";
-    if (!fs::exists(dir)) fs::create_directory(dir);
+    if (!fs::exists(dir))
+        fs::create_directory(dir);
 
-    Eigen::Matrix<unsigned char,Eigen::Dynamic,Eigen::Dynamic> buffer_R(1000,1000);
-    Eigen::Matrix<unsigned char,Eigen::Dynamic,Eigen::Dynamic> buffer_G(1000,1000);
-    Eigen::Matrix<unsigned char,Eigen::Dynamic,Eigen::Dynamic> buffer_B(1000,1000);
-    Eigen::Matrix<unsigned char,Eigen::Dynamic,Eigen::Dynamic> buffer_A(1000,1000);
-
+    Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> buffer_R(1000, 1000);
+    Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> buffer_G(1000, 1000);
+    Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> buffer_B(1000, 1000);
+    Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> buffer_A(1000, 1000);
 
     // Parameters
     Eigen::VectorXd c(Nv);
 
-
-    for(int v = 0; v < Nv; v++) {
+    for (int v = 0; v < Nv; v++)
+    {
         c(v) = V.coeff(v, 0) > 0.1;
     }
-
-
 
     Eigen::SparseMatrix<double> A = M + TIMESTEP * ALPHA * K;
     // Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
@@ -226,10 +241,11 @@ int main() {
 
     auto operators = overlapping_decomposition(T, V.rows(), NUM_PARTITIONS, NUM_OVERLAP_LAYERS);
 
-    Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower|Eigen::Upper, ASMPreconditioner> solver;
+    Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper, ASMPreconditioner> solver;
     solver.preconditioner().loadPartitions(std::move(operators));
     solver.compute(A);
-    for (int step = 0; step < NUM_STEPS; ++step) {
+    for (int step = 0; step < NUM_STEPS; ++step)
+    {
 
         // Save it to a PNG
         er.set_data(c);
@@ -243,8 +259,6 @@ int main() {
         c = solver.solve(b);
 
         std::cout << step << std::endl;
-
     }
     return 0;
 }
-

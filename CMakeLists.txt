@@ -7,11 +7,11 @@ list(PREPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(libigl)
 
 # Enable the target igl::glfw
-igl_include(glfw)
+# igl_include(glfw)
 # Other modules you could enable
 igl_include(embree)
 #igl_include(imgui)
-igl_include(opengl)
+# igl_include(opengl)
 igl_include(stb)
 #igl_include(predicates)
 #igl_include(xml)
@@ -30,7 +30,7 @@ add_executable(${PROJECT_NAME} ${SRC_FILES})
 
 # Link igl (and the glfw module) to your project
 target_link_libraries(${PROJECT_NAME} PUBLIC 
-  igl::glfw
+  # igl::glfw
   ## Other modules you could link to
    igl::embree
   # igl::imgui
@@ -49,9 +49,8 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
 
   )
 
-find_package(METIS REQUIRED)
-target_link_libraries(${PROJECT_NAME} PUBLIC ${METIS_LIBRARIES})
-target_include_directories(${PROJECT_NAME} PUBLIC ${METIS_INCLUDE_DIRS})
+find_package(Metis REQUIRED)
+target_link_libraries(${PROJECT_NAME} PUBLIC Metis::Metis)
 
 find_package(OpenMP COMPONENTS CXX REQUIRED)
 target_link_libraries(${PROJECT_NAME} PUBLIC OpenMP::OpenMP_CXX)

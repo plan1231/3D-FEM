@@ -1,7 +1,9 @@
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <igl/readMESH.h>
+#include <igl/readOBJ.h>
 #include <igl/boundary_facets.h>
+#include <igl/copyleft/tetgen/tetrahedralize.h>
 #include <cmath>
 #include <vector>
 #include <igl/colormap.h>
@@ -9,7 +11,7 @@
 #include <igl/embree/EmbreeRenderer.h>
 #include <filesystem>
 #include "domain_partitioning.h"
-
+#include <omp.h>
 #define NUM_PARTITIONS 3
 #define NUM_OVERLAP_LAYERS 2
 
@@ -141,21 +143,27 @@ double tetrahedron_volume(const Eigen::Vector3d& X0, const Eigen::Vector3d& X1, 
 
 int main() {
     // Load geometric data
-    Eigen::MatrixXd V; // Vertices
+    Eigen::MatrixXd surfaceV, V; // Vertices
     Eigen::MatrixXi T; // Tetrahedrons (connectivity)
-    Eigen::MatrixXi F; // Faces
+    Eigen::MatrixXi surfaceF,F; // Faces
 
-    igl::readMESH("../data/coarser_bunny.mesh", V, T, F);
-    igl::boundary_facets(T, F);
-    F = F.rowwise().reverse().eval();
+    igl::readOBJ("../data/armadillo.obj", surfaceV, surfaceF);
+    igl::copyleft::tetgen::tetrahedralize(surfaceV, surfaceF,"pq1.414Y", V,T,F);
+
+//    igl::readMESH("../data/coarser_bunny.mesh", V, T, F);
+
+    igl::boundary_facets(T, surfaceF);
+    surfaceF = surfaceF.rowwise().reverse().eval();
 
     int Nv = V.rows(); // Number of vertices
     int Ne = T.rows(); // Number of elements
 
     Eigen::SparseMatrix<double> K(Nv, Nv);
     Eigen::SparseMatrix<double> M(Nv, Nv);
-
+    K.resize(Nv, Nv);
+    M.resize(Nv, Nv);
     Eigen::Matrix<double, 4, 4> Ke, Me;
+    #pragma omp parallel for num_threads(4)
     for (int tet_idx = 0; tet_idx < Ne; ++tet_idx) {
         double volume = tetrahedron_volume(V.row(T(tet_idx, 0)), V.row(T(tet_idx, 1)),
                                            V.row(T(tet_idx, 2)), V.row(T(tet_idx, 3)));
@@ -168,7 +176,9 @@ int main() {
         for (int ti = 0; ti < 4; ++ti) {
 
             for (int tj = 0; tj < 4; ++tj) {
+                #pragma omp atomic
                 K.coeffRef(indices(ti), indices(tj)) += Ke.coeff(ti, tj);
+                #pragma omp atomic
                 M.coeffRef(indices(ti), indices(tj)) += Me.coeff(ti, tj);
             }
         }
@@ -178,7 +188,7 @@ int main() {
     M.makeCompressed();
 
     igl::embree::EmbreeRenderer er;
-    er.set_mesh(V, F, true);
+    er.set_mesh(V, surfaceF, true);
     Eigen::Matrix3d rot_matrix;
 // Specify rotation matrix:
 //     10 degrees around X axis
@@ -237,3 +247,4 @@ int main() {
     }
     return 0;
 }
+

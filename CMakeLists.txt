@@ -52,3 +52,6 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
 find_package(METIS REQUIRED)
 target_link_libraries(${PROJECT_NAME} PUBLIC ${METIS_LIBRARIES})
 target_include_directories(${PROJECT_NAME} PUBLIC ${METIS_INCLUDE_DIRS})
+
+find_package(OpenMP COMPONENTS CXX REQUIRED)
+target_link_libraries(${PROJECT_NAME} PUBLIC OpenMP::OpenMP_CXX)

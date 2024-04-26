@@ -75,8 +75,7 @@ std::vector<int> metis_partition(const Eigen::MatrixXi &T, int num_nodes, int nu
     options[METIS_OPTION_CONTIG] = 1;  // Ensure the partitions are contiguous
     options[METIS_OPTION_NUMBERING] = 0; // C-style 0-based numbering
 
-    idx_t ncommon = 3;
-    // PartMeshDual partitions the mesh into k parts (elements)
+    idx_t ncommon = 3; // set to 3 as per METIS manual recommendation
     int ret = METIS_PartMeshDual(&num_elements, &num_nodes, eptr.data(), eind.data(), NULL, NULL, &ncommon, &num_partitions, NULL, options, &edgecut, epart.data(), npart.data());
 
     if (ret != METIS_OK) {

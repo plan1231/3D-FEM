@@ -27,7 +27,7 @@ struct CLIArgs
     bool renderImages = false;
     CLIArgs(int argc, char *argv[])
     {
-        CLI::App app{"IPC"};
+        CLI::App app{"3D FEM Solver with (optional) ASM Preconditioner"};
 
         app.add_option("--overlap", num_overlap_layers, "number of layers of overlap between partitions in the decomposition")
             ->default_val(num_overlap_layers);

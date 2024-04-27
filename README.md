@@ -2,7 +2,7 @@
 
 ## Dependencies
 This project assumes that [metis](http://glaros.dtc.umn.edu/gkhome/metis/metis/overview) and OpenMP
-is already installed on your system. We use metis to partition input meshes into overlapping
+are already installed on your system. We use metis to partition input meshes into overlapping
 subdomains, and OpenMP for paralellizing the program. On debian-based systems, run
 ```
 apt install libomp-dev libmetis-dev

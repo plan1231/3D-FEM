@@ -16,73 +16,52 @@
 #include <Eigen/src/SparseLU/SparseLU.h>
 #include <CLI/CLI.hpp>
 
-struct CLIArgs {
-    int num_partitions = 8;
+struct CLIArgs
+{
+    int num_partitions; // default is based on number of processors
     int num_overlap_layers = 3;
     int num_steps = 50;
     double timestep = 0.1;
     double alpha = 5.0;
-
-    // const std::vector<std::pair<std::string, int>>
-    //     PROG_MODE_NAMES_TO_PROG_MODE = {
-    //         { "gui", 0 },
-    //         { "gui_play", 10 },
-    //         { "gui_play_save_png", 11 },
-    //         { "offline", 100 },
-    //     };
-
-    // std::string inputFileName;
-    // std::string outputDir = "";
-    // std::string folderTail = "";
-
-    // spdlog::level::level_enum logLevel = spdlog::level::trace;
-    // const std::vector<std::pair<std::string, spdlog::level::level_enum>>
-    //     SPDLOG_LEVEL_NAMES_TO_LEVELS = {
-    //         { "trace", spdlog::level::trace },
-    //         { "debug", spdlog::level::debug },
-    //         { "info", spdlog::level::info },
-    //         { "warning", spdlog::level::warn },
-    //         { "error", spdlog::level::err },
-    //         { "critical", spdlog::level::critical },
-    //         { "off", spdlog::level::off }
-    //     };
-
     bool usePreconditioner = false;
-
-    CLIArgs(int argc, char* argv[])
+    bool renderImages = false;
+    CLIArgs(int argc, char *argv[])
     {
-        CLI::App app{ "IPC" };
-
- int num_partitions = 8;
+        CLI::App app{"IPC"};
 
         app.add_option("--overlap", num_overlap_layers, "number of layers of overlap between partitions in the decomposition")
             ->default_val(num_overlap_layers);
 
         app.add_option("--partitions", num_partitions, "number of partitions to decompose the domain into")
-            ->default_val(num_partitions);
-        
+            ->default_val(omp_get_num_procs());
+
         app.add_option("--steps", num_steps, "number of time steps to simulate")
             ->default_val(num_steps);
 
         app.add_option("--timestep", timestep, "time step size")
             ->default_val(timestep);
-        
+
         app.add_option("--alpha", alpha, "material alpha")
             ->default_val(alpha);
 
-
         app.add_flag("-p,--preconditioner", usePreconditioner,
-            "use ASM preconditioner for the solver");
+                     "use ASM preconditioner for the solver")
+            ->default_val(usePreconditioner);
 
-        try {
+        app.add_flag("-r,--render", renderImages,
+                     "render images of the simulation at each time step")
+            ->default_val(renderImages);
+
+        try
+        {
             app.parse(argc, argv);
         }
-        catch (const CLI::ParseError& e) {
+        catch (const CLI::ParseError &e)
+        {
             exit(app.exit(e));
         }
     }
 };
-
 
 class ASMPreconditioner
 {
@@ -102,14 +81,13 @@ public:
     void loadPartitions(std::vector<PartitionOperators> &&operators)
     {
         this->operators = std::move(operators);
-       
     }
 
     void compute(const MatrixType &A)
     {
         preconditioner.resize(A.rows(), A.cols());
         preconditioner.setZero();
-        #pragma omp parallel for
+#pragma omp parallel for
         for (int i = 0; i < operators.size(); ++i)
         {
             MatrixType localA = operators[i].R * A * operators[i].E;
@@ -118,13 +96,16 @@ public:
             MatrixType identity(localA.rows(), localA.cols());
             identity.setIdentity();
             MatrixType localInverse = solver.solve(identity);
-            #pragma omp critical
+#pragma omp critical
             {
+                std::cout << "Computed preconditioner for partition " << i << std::endl;
                 preconditioner += operators[i].E * localInverse * operators[i].R;
             }
-
         }
-
+        preconditioner.makeCompressed();
+        std::cout << "finished computing preconditioner" << std::endl;
+        std::cout << (double)preconditioner.nonZeros() / preconditioner.rows() * preconditioner.cols() << " percent of the preconditioner is non-zero" << std::endl;
+        
         preconditioner_computed = true;
     }
 
@@ -199,13 +180,14 @@ double tetrahedron_volume(const Eigen::Vector3d &X0, const Eigen::Vector3d &X1, 
     return volume;
 }
 
-int main(int argc, char** argv)
+int main(int argc, char **argv)
 {
     CLIArgs args = CLIArgs(argc, argv);
 
     Timer timer;
     timer.new_activity("calculate preconditioner");
     timer.new_activity("solve");
+    timer.new_activity("build stiffness and mass matrices");
 
     // Load geometric data
     Eigen::MatrixXd surfaceV, V; // Vertices
@@ -225,6 +207,7 @@ int main(int argc, char** argv)
     std::cout << "building stiffness and mass matrices" << std::endl;
     Eigen::SparseMatrix<double> K(Nv, Nv);
     Eigen::SparseMatrix<double> M(Nv, Nv);
+    timer.start(2);
 #pragma omp parallel
     {
         Eigen::SparseMatrix<double> K_local(Nv, Nv);
@@ -260,6 +243,7 @@ int main(int argc, char** argv)
     }
     K.makeCompressed();
     M.makeCompressed();
+    timer.stop();
 
     igl::embree::EmbreeRenderer er;
     er.set_mesh(V, surfaceF, true);
@@ -272,9 +256,12 @@ int main(int argc, char** argv)
     er.set_rot(rot_matrix);
 
     // create output directory if not exists
-    fs::path dir = "result";
-    if (!fs::exists(dir))
-        fs::create_directory(dir);
+    if (args.renderImages)
+    {
+        fs::path dir = "result";
+        if (!fs::exists(dir))
+            fs::create_directory(dir);
+    }
 
     Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> buffer_R(1000, 1000);
     Eigen::Matrix<unsigned char, Eigen::Dynamic, Eigen::Dynamic> buffer_G(1000, 1000);
@@ -294,17 +281,18 @@ int main(int argc, char** argv)
     std::cout << "Decomposing domain" << std::endl;
     auto operators = overlapping_decomposition(T, V.rows(), args.num_partitions, args.num_overlap_layers);
 
-    Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper, ASMPreconditioner> solver_pre;
+    Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper, ASMPreconditioner> solver_asm;
     Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper> solver;
 
-    if(args.usePreconditioner){
+    if (args.usePreconditioner)
+    {
         std::cout << "Computing preconditioner with " << operators.size() << " subdomains" << std::endl;
-        solver_pre.preconditioner().loadPartitions(std::move(operators));
+        solver_asm.preconditioner().loadPartitions(std::move(operators));
         timer.start(0);
-        solver_pre.compute(A);
+        solver_asm.compute(A);
         timer.stop();
     }
-    
+
     solver.compute(A);
 
     std::cout << "Solving system" << std::endl;
@@ -313,23 +301,29 @@ int main(int argc, char** argv)
     for (int step = 0; step < args.num_steps; ++step)
     {
 
-        // Save it to a PNG
-        // er.set_data(c);
-        // er.render_buffer(buffer_R, buffer_G, buffer_B, buffer_A);
-        // std::ostringstream ss;
-        // ss << "result/" << step << ".png";
-        // igl::stb::write_image(ss.str(), buffer_R, buffer_G, buffer_B, buffer_A);
+        // Save result to a PNG
+        if (args.renderImages)
+        {
+            er.set_data(c);
+            er.render_buffer(buffer_R, buffer_G, buffer_B, buffer_A);
+            std::ostringstream ss;
+            ss << "result/" << step << ".png";
+            igl::stb::write_image(ss.str(), buffer_R, buffer_G, buffer_B, buffer_A);
+        }
 
         // solve the system for the next timestep
         Eigen::VectorXd b = M * c;
         timer.start(1);
-        if(args.usePreconditioner){
-            c = solver_pre.solveWithGuess(b, c);
-        } else {
+        if (args.usePreconditioner)
+        {
+            c = solver_asm.solveWithGuess(b, c);
+        }
+        else
+        {
             c = solver.solveWithGuess(b, c);
         }
         timer.stop();
-        
+
         std::cout << step << std::endl
                   << "iterations: " << solver.iterations() << std::endl;
     }

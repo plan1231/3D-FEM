@@ -10,14 +10,79 @@
 #include <igl/stb/write_image.h>
 #include <igl/embree/EmbreeRenderer.h>
 #include <filesystem>
+#include "Timer.h"
 #include "domain_partitioning.h"
 #include <omp.h>
-#define NUM_PARTITIONS 3
-#define NUM_OVERLAP_LAYERS 2
+#include <Eigen/src/SparseLU/SparseLU.h>
+#include <CLI/CLI.hpp>
 
-#define NUM_STEPS 50
-#define TIMESTEP 0.1
-#define ALPHA 5.0
+struct CLIArgs {
+    int num_partitions = 8;
+    int num_overlap_layers = 3;
+    int num_steps = 50;
+    double timestep = 0.1;
+    double alpha = 5.0;
+
+    // const std::vector<std::pair<std::string, int>>
+    //     PROG_MODE_NAMES_TO_PROG_MODE = {
+    //         { "gui", 0 },
+    //         { "gui_play", 10 },
+    //         { "gui_play_save_png", 11 },
+    //         { "offline", 100 },
+    //     };
+
+    // std::string inputFileName;
+    // std::string outputDir = "";
+    // std::string folderTail = "";
+
+    // spdlog::level::level_enum logLevel = spdlog::level::trace;
+    // const std::vector<std::pair<std::string, spdlog::level::level_enum>>
+    //     SPDLOG_LEVEL_NAMES_TO_LEVELS = {
+    //         { "trace", spdlog::level::trace },
+    //         { "debug", spdlog::level::debug },
+    //         { "info", spdlog::level::info },
+    //         { "warning", spdlog::level::warn },
+    //         { "error", spdlog::level::err },
+    //         { "critical", spdlog::level::critical },
+    //         { "off", spdlog::level::off }
+    //     };
+
+    bool usePreconditioner = false;
+
+    CLIArgs(int argc, char* argv[])
+    {
+        CLI::App app{ "IPC" };
+
+ int num_partitions = 8;
+
+        app.add_option("--overlap", num_overlap_layers, "number of layers of overlap between partitions in the decomposition")
+            ->default_val(num_overlap_layers);
+
+        app.add_option("--partitions", num_partitions, "number of partitions to decompose the domain into")
+            ->default_val(num_partitions);
+        
+        app.add_option("--steps", num_steps, "number of time steps to simulate")
+            ->default_val(num_steps);
+
+        app.add_option("--timestep", timestep, "time step size")
+            ->default_val(timestep);
+        
+        app.add_option("--alpha", alpha, "material alpha")
+            ->default_val(alpha);
+
+
+        app.add_flag("-p,--preconditioner", usePreconditioner,
+            "use ASM preconditioner for the solver");
+
+        try {
+            app.parse(argc, argv);
+        }
+        catch (const CLI::ParseError& e) {
+            exit(app.exit(e));
+        }
+    }
+};
+
 
 class ASMPreconditioner
 {
@@ -26,7 +91,7 @@ public:
 
     Eigen::VectorXd solve(const Eigen::VectorXd &rhs) const
     {
-        return matrix * rhs;
+        return preconditioner * rhs;
     }
 
     Eigen::ComputationInfo info() const
@@ -37,48 +102,36 @@ public:
     void loadPartitions(std::vector<PartitionOperators> &&operators)
     {
         this->operators = std::move(operators);
+       
     }
 
     void compute(const MatrixType &A)
     {
-        // Create an identity matrix of the same size as 'matrix'
-
-        Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
-        matrix.resize(A.rows(), A.cols());
-        matrix.setZero();
-
-        for (const auto &op : operators)
+        preconditioner.resize(A.rows(), A.cols());
+        preconditioner.setZero();
+        #pragma omp parallel for
+        for (int i = 0; i < operators.size(); ++i)
         {
-            MatrixType localA = op.R * A * op.E;
-            Eigen::SparseMatrix<double> identity(localA.rows(), localA.cols());
+            MatrixType localA = operators[i].R * A * operators[i].E;
+            Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper> solver;
+            solver.compute(localA);
+            MatrixType identity(localA.rows(), localA.cols());
             identity.setIdentity();
-
-            // Setup and solve using SparseLU
-            solver.analyzePattern(localA);
-            solver.factorize(localA);
-            if (solver.info() != Eigen::Success)
+            MatrixType localInverse = solver.solve(identity);
+            #pragma omp critical
             {
-                throw std::runtime_error("Local decomposition failed!");
+                preconditioner += operators[i].E * localInverse * operators[i].R;
             }
 
-            Eigen::SparseMatrix<double> localInverse = solver.solve(identity);
-            if (solver.info() != Eigen::Success)
-            {
-                throw std::runtime_error("Local inversion failed!");
-            }
-
-            // Add to global preconditioner matrix
-            matrix += op.E * localInverse * op.R;
         }
-        matrix.makeCompressed();
+
         preconditioner_computed = true;
     }
 
 private:
     std::vector<PartitionOperators> operators; // restriction and extension operators for each partition
-    Eigen::SparseLU<MatrixType> local_solver;  // Local solver for each partition
-    MatrixType matrix;
     bool preconditioner_computed = false;
+    Eigen::SparseMatrix<double> preconditioner;
 };
 
 namespace fs = std::filesystem;
@@ -146,41 +199,39 @@ double tetrahedron_volume(const Eigen::Vector3d &X0, const Eigen::Vector3d &X1, 
     return volume;
 }
 
-int main()
+int main(int argc, char** argv)
 {
+    CLIArgs args = CLIArgs(argc, argv);
+
     // Load geometric data
     Eigen::MatrixXd surfaceV, V; // Vertices
     Eigen::MatrixXi T;           // Tetrahedrons (connectivity)
     Eigen::MatrixXi surfaceF, F; // Faces
 
     igl::readOBJ("../data/armadillo.obj", surfaceV, surfaceF);
-    igl::copyleft::tetgen::tetrahedralize(surfaceV, surfaceF, "pq1.414Y", V, T, F);
+    igl::copyleft::tetgen::tetrahedralize(surfaceV, surfaceF, "pq7.0Y", V, T, F);
 
-    //    igl::readMESH("../data/coarser_bunny.mesh", V, T, F);
-
-    igl::boundary_facets(T, surfaceF);
-    surfaceF = surfaceF.rowwise().reverse().eval();
+    // igl::readMESH("../data/coarser_bunny.mesh", V, T, F);
+    // igl::boundary_facets(T, surfaceF);
+    // surfaceF = surfaceF.rowwise().reverse().eval();
 
     int Nv = V.rows(); // Number of vertices
     int Ne = T.rows(); // Number of elements
 
+    std::cout << "building stiffness and mass matrices" << std::endl;
     Eigen::SparseMatrix<double> K(Nv, Nv);
     Eigen::SparseMatrix<double> M(Nv, Nv);
-    K.resize(Nv, Nv);
-    M.resize(Nv, Nv);
-    #pragma omp parallel 
+#pragma omp parallel
     {
         Eigen::SparseMatrix<double> K_local(Nv, Nv);
         Eigen::SparseMatrix<double> M_local(Nv, Nv);
-        K_local.resize(Nv, Nv);
-        M_local.resize(Nv, Nv);
-        #pragma omp for
+#pragma omp for
         for (int tet_idx = 0; tet_idx < Ne; ++tet_idx)
         {
             Eigen::Matrix<double, 4, 4> Ke, Me;
 
             double volume = tetrahedron_volume(V.row(T(tet_idx, 0)), V.row(T(tet_idx, 1)),
-                                            V.row(T(tet_idx, 2)), V.row(T(tet_idx, 3)));
+                                               V.row(T(tet_idx, 2)), V.row(T(tet_idx, 3)));
 
             auto indices = T.row(tet_idx);
 
@@ -197,7 +248,7 @@ int main()
                 }
             }
         }
-        #pragma omp critical
+#pragma omp critical
         {
             K += K_local;
             M += M_local;
@@ -211,9 +262,9 @@ int main()
     Eigen::Matrix3d rot_matrix;
     // Specify rotation matrix:
     //     10 degrees around X axis
-    //      5 degrees around Y axis
+    //    180 degrees around Y axis
     //      4 degrees around Z axis
-    rot_matrix = Eigen::AngleAxisd(10 * igl::PI / 180.0, Eigen::Vector3d::UnitX()) * Eigen::AngleAxisd(5 * igl::PI / 180.0, Eigen::Vector3d::UnitY()) * Eigen::AngleAxisd(4 * igl::PI / 180.0, Eigen::Vector3d::UnitZ());
+    rot_matrix = Eigen::AngleAxisd(10 * igl::PI / 180.0, Eigen::Vector3d::UnitX()) * Eigen::AngleAxisd(igl::PI, Eigen::Vector3d::UnitY()) * Eigen::AngleAxisd(4 * igl::PI / 180.0, Eigen::Vector3d::UnitZ());
     er.set_rot(rot_matrix);
 
     // create output directory if not exists
@@ -234,31 +285,49 @@ int main()
         c(v) = V.coeff(v, 0) > 0.1;
     }
 
-    Eigen::SparseMatrix<double> A = M + TIMESTEP * ALPHA * K;
-    // Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
-    // solver.analyzePattern(A);
-    // solver.factorize(A);
+    Eigen::SparseMatrix<double> A = M + args.timestep * args.alpha * K;
 
-    auto operators = overlapping_decomposition(T, V.rows(), NUM_PARTITIONS, NUM_OVERLAP_LAYERS);
+    std::cout << "Decomposing domain" << std::endl;
+    auto operators = overlapping_decomposition(T, V.rows(), args.num_partitions, args.num_overlap_layers);
 
-    Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper, ASMPreconditioner> solver;
-    solver.preconditioner().loadPartitions(std::move(operators));
+    Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper, ASMPreconditioner> solver_pre;
+    Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper> solver;
+
+    if(args.usePreconditioner){
+        std::cout << "Computing preconditioner with " << operators.size() << " subdomains" << std::endl;
+        solver_pre.preconditioner().loadPartitions(std::move(operators));
+        solver_pre.compute(A);
+    }
+    
     solver.compute(A);
-    for (int step = 0; step < NUM_STEPS; ++step)
+
+    std::cout << "Solving system" << std::endl;
+    Timer timer;
+
+    timer.print_on_exit(true);
+    timer.new_activity("Solve");
+    for (int step = 0; step < args.num_steps; ++step)
     {
 
         // Save it to a PNG
-        er.set_data(c);
-        er.render_buffer(buffer_R, buffer_G, buffer_B, buffer_A);
-        std::ostringstream ss;
-        ss << "result/" << step << ".png";
-        igl::stb::write_image(ss.str(), buffer_R, buffer_G, buffer_B, buffer_A);
+        // er.set_data(c);
+        // er.render_buffer(buffer_R, buffer_G, buffer_B, buffer_A);
+        // std::ostringstream ss;
+        // ss << "result/" << step << ".png";
+        // igl::stb::write_image(ss.str(), buffer_R, buffer_G, buffer_B, buffer_A);
 
         // solve the system for the next timestep
         Eigen::VectorXd b = M * c;
-        c = solver.solve(b);
-
-        std::cout << step << std::endl;
+        timer.start(0);
+        if(args.usePreconditioner){
+            c = solver_pre.solveWithGuess(b, c);
+        } else {
+            c = solver.solveWithGuess(b, c);
+        }
+        timer.stop();
+        
+        std::cout << step << std::endl
+                  << "iterations: " << solver.iterations() << std::endl;
     }
     return 0;
 }

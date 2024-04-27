@@ -54,3 +54,6 @@ target_link_libraries(${PROJECT_NAME} PUBLIC Metis::Metis)
 
 find_package(OpenMP COMPONENTS CXX REQUIRED)
 target_link_libraries(${PROJECT_NAME} PUBLIC OpenMP::OpenMP_CXX)
+
+include(cli11)
+target_link_libraries(${PROJECT_NAME} PUBLIC CLI11::CLI11)

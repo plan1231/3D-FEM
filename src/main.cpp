@@ -203,6 +203,10 @@ int main(int argc, char** argv)
 {
     CLIArgs args = CLIArgs(argc, argv);
 
+    Timer timer;
+    timer.new_activity("calculate preconditioner");
+    timer.new_activity("solve");
+
     // Load geometric data
     Eigen::MatrixXd surfaceV, V; // Vertices
     Eigen::MatrixXi T;           // Tetrahedrons (connectivity)
@@ -296,16 +300,16 @@ int main(int argc, char** argv)
     if(args.usePreconditioner){
         std::cout << "Computing preconditioner with " << operators.size() << " subdomains" << std::endl;
         solver_pre.preconditioner().loadPartitions(std::move(operators));
+        timer.start(0);
         solver_pre.compute(A);
+        timer.stop();
     }
     
     solver.compute(A);
 
     std::cout << "Solving system" << std::endl;
-    Timer timer;
 
     timer.print_on_exit(true);
-    timer.new_activity("Solve");
     for (int step = 0; step < args.num_steps; ++step)
     {
 
@@ -318,7 +322,7 @@ int main(int argc, char** argv)
 
         // solve the system for the next timestep
         Eigen::VectorXd b = M * c;
-        timer.start(0);
+        timer.start(1);
         if(args.usePreconditioner){
             c = solver_pre.solveWithGuess(b, c);
         } else {

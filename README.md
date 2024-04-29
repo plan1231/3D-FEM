@@ -33,7 +33,7 @@ cd build
 make
 ```
 
-## Tetgen errors
+### Tetgen errors
 The version of Tetgen that ships with libigl seems to contain a bug. When compiling for the first time in Debug mode,
 your compiler might throw this error:
 ```
@@ -53,8 +53,20 @@ make: *** [Makefile:156: all] Error 2
 ```
 To fix this, go to the file that contains this error and delete this line.
 
-
- the compiled binary should be called `3d_fem`. Use `3d_fem -h` to see the list of all options. 
+## Running
+the compiled binary should be called `3d_fem`. Use `3d_fem -h` to see the list of all options. 
  
- When running the program, your present working directory must be in `build`, as the path to the input files are hardcoded
- (see main.cpp:197). This might be fixed in the future.
+Examples:
+```
+ ./3d_fem -i ../data/Armadillo13K.msh -r
+ ```
+- `-i` specify input file path
+- `-r` render result. Images will be stored under `${PWD}/data`
+
+```
+./3d_fem -i ../data/Armadillo13K.msh -p --partitions 10 --steps 20 --threads 8
+```
+- `-p` use ASM preconditioner for the solver
+- `--partitions` number of partitions to divide the domain into
+- `--steps` number of timesteps to simulate
+- `--threads` max number of threads to use

@@ -4,9 +4,6 @@ list(PREPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 project(3d_fem)
 
 set(CMAKE_CXX_STANDARD 17)
-if(NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE Debug)
-endif()
 
 # Libigl
 include(libigl)
@@ -24,7 +21,7 @@ igl_include(stb)
 #igl_include(copyleft comiso)
 #igl_include(copyleft core)
 #igl_include(copyleft cork)
-igl_include(copyleft tetgen)
+#igl_include(copyleft tetgen)
 #igl_include(restricted matlab)
 #igl_include(restricted mosek)
 #igl_include(restricted triangle)
@@ -47,7 +44,7 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
   # igl_copyleft::comiso
   # igl_copyleft::core
   # igl_copyleft::cork
-  igl_copyleft::tetgen
+  # igl_copyleft::tetgen
   # igl_restricted::matlab
   # igl_restricted::mosek
   # igl_restricted::triangle

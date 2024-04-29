@@ -1,22 +1,22 @@
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <Eigen/Eigen>
-#include <igl/readMESH.h>
-#include <igl/readOBJ.h>
-#include <igl/boundary_facets.h>
-#include <igl/copyleft/tetgen/tetrahedralize.h>
 #include <cmath>
 #include <vector>
 #include <igl/colormap.h>
 #include <igl/stb/write_image.h>
 #include <igl/embree/EmbreeRenderer.h>
 #include <filesystem>
-#include "Timer.h"
-#include "domain_partitioning.h"
+#include <string>
 #include <omp.h>
 #include <Eigen/src/SparseLU/SparseLU.h>
 #include <CLI/CLI.hpp>
 #include <Eigen/Core>
+
+#include "Timer.h"
+#include "domain_partitioning.h"
+#include "readTetMesh.h"
+
 struct CLIArgs
 {
     int num_partitions; // default is based on number of processors
@@ -29,6 +29,7 @@ struct CLIArgs
     bool usePreconditioner = false;
     bool renderImages = false;
     int num_threads;
+    std::string filename;
     CLIArgs(int argc, char *argv[])
     {
         CLI::App app{"3D FEM Solver with (optional) ASM Preconditioner"};
@@ -59,6 +60,7 @@ struct CLIArgs
         app.add_option("--threads", num_threads, "max number of threads to use")
             ->default_val(omp_get_num_procs());
 
+        app.add_option("-i", filename, "path to the input .msh file");
         try
         {
             app.parse(argc, argv);
@@ -66,6 +68,12 @@ struct CLIArgs
         catch (const CLI::ParseError &e)
         {
             exit(app.exit(e));
+        }
+
+        if(filename.empty())
+        {
+            std::cerr << "Please provide a path to the input .msh file. Use -h for help." << std::endl;
+            exit(1);
         }
     }
 };
@@ -137,17 +145,6 @@ public:
         preconditioner.makeCompressed();
         preconditioner_computed = true;
 
-
-    //       m_invdiag.resize(A.cols());
-    //    for(int j=0; j<A.outerSize(); ++j)
-    //    {
-    //      typename MatrixType::InnerIterator it(A,j);
-    //      while(it && it.index()!=j) ++it;
-    //      if(it && it.index()==j && it.value()!=Scalar(0))
-    //        m_invdiag(j) = Scalar(1)/it.value();
-    //      else
-    //        m_invdiag(j) = Scalar(1);
-    //    }
     }
 
 private:
@@ -232,20 +229,15 @@ int main(int argc, char **argv)
 
     timer.print_on_exit(true);
 
+    Eigen::MatrixXd TV;
+    Eigen::MatrixXi TT;
+    Eigen::MatrixXi SF;
+
     // Load geometric data
-    Eigen::MatrixXd surfaceV, V; // Vertices
-    Eigen::MatrixXi T;           // Tetrahedrons (connectivity)
-    Eigen::MatrixXi surfaceF, F; // Faces
+    readTetMesh_msh4(args.filename, TV, TT, SF);
 
-    igl::readOBJ("../data/armadillo.obj", surfaceV, surfaceF);
-    igl::copyleft::tetgen::tetrahedralize(surfaceV, surfaceF, "pq7.0Y", V, T, F);
-
-    // igl::readMESH("../data/coarser_bunny.mesh", V, T, F);
-    // igl::boundary_facets(T, surfaceF);
-    // surfaceF = surfaceF.rowwise().reverse().eval();
-
-    int Nv = V.rows(); // Number of vertices
-    int Ne = T.rows(); // Number of elements
+    int Nv = TV.rows(); // Number of vertices
+    int Ne = TT.rows(); // Number of elements
 
     std::cout << "building stiffness and mass matrices" << std::endl;
     Eigen::SparseMatrix<double> K(Nv, Nv);
@@ -260,12 +252,12 @@ int main(int argc, char **argv)
         {
             Eigen::Matrix<double, 4, 4> Ke, Me;
 
-            double volume = tetrahedron_volume(V.row(T(tet_idx, 0)), V.row(T(tet_idx, 1)),
-                                               V.row(T(tet_idx, 2)), V.row(T(tet_idx, 3)));
+            double volume = tetrahedron_volume(TV.row(TT(tet_idx, 0)), TV.row(TT(tet_idx, 1)),
+                                               TV.row(TT(tet_idx, 2)), TV.row(TT(tet_idx, 3)));
 
-            auto indices = T.row(tet_idx);
+            auto indices = TT.row(tet_idx);
 
-            tetrahedron_stiffness(Ke, volume, indices, V);
+            tetrahedron_stiffness(Ke, volume, indices, TV);
             tetrahedron_mass(Me, volume);
 
             for (int ti = 0; ti < 4; ++ti)
@@ -289,7 +281,7 @@ int main(int argc, char **argv)
     timer.stop();
 
     igl::embree::EmbreeRenderer er;
-    er.set_mesh(V, surfaceF, true);
+    er.set_mesh(TV, SF, true);
     Eigen::Matrix3d rot_matrix;
     // Specify rotation matrix:
     //     10 degrees around X axis
@@ -316,7 +308,7 @@ int main(int argc, char **argv)
 
     for (int v = 0; v < Nv; v++)
     {
-        c(v) = (V.coeff(v, 0) > 0.1) * 3;
+        c(v) = (TV.coeff(v, 0) > 0.1) * 3;
     }
     double min_c = c.minCoeff(), max_c = c.maxCoeff();
     Eigen::SparseMatrix<double> A = M + args.timestep * args.alpha * K;
@@ -327,7 +319,7 @@ int main(int argc, char **argv)
     if (args.usePreconditioner)
     {
         std::cout << "Decomposing domain" << std::endl;
-        auto operators = overlapping_decomposition(T, V.rows(), args.num_partitions, args.num_overlap_layers);
+        auto operators = overlapping_decomposition(TT, TV.rows(), args.num_partitions, args.num_overlap_layers);
         for (int i = 0; i < operators.size(); ++i)
         {
             std::cout << "Partition " << i << " has " << operators[i].R.rows() << " elements" << std::endl;
@@ -347,8 +339,6 @@ int main(int argc, char **argv)
 
     for (int step = 0; step < args.num_steps; ++step)
     {
-        std::cout << "min c: " << c.minCoeff() << " max c: " << c.maxCoeff() << std::endl;
-
         // Save result to a PNG
         if (args.renderImages)
         {

@@ -18,7 +18,7 @@ Euler integration.
 has to be a tetrahedron) into overlapping subdomains. We then build the restriction
 and extension matrices for each subdomain.
 
-## Compile
+## Compiling
 For release mode with all optimizations
 ```
 cmake --preset=gcc -DCMAKE_BUILD_TYPE=Release -B release
@@ -33,7 +33,7 @@ cd build
 make
 ```
 
-##
+## Tetgen errors
 The version of Tetgen that ships with libigl seems to contain a bug. When compiling for the first time in Debug mode,
 your compiler might throw this error:
 ```

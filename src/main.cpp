@@ -1,5 +1,6 @@
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
+#include <Eigen/Eigen>
 #include <igl/readMESH.h>
 #include <igl/readOBJ.h>
 #include <igl/boundary_facets.h>
@@ -15,14 +16,14 @@
 #include <omp.h>
 #include <Eigen/src/SparseLU/SparseLU.h>
 #include <CLI/CLI.hpp>
-
+#include <Eigen/Core>
 struct CLIArgs
 {
     int num_partitions; // default is based on number of processors
-    int num_overlap_layers = 3;
+    int num_overlap_layers = 1;
     int num_steps = 50;
     double timestep = 0.1;
-    double alpha = 5.0;
+    double alpha = 1.0;
     bool usePreconditioner = false;
     bool renderImages = false;
     CLIArgs(int argc, char *argv[])
@@ -63,14 +64,35 @@ struct CLIArgs
     }
 };
 
+template <typename Scalar_>
 class ASMPreconditioner
 {
-public:
-    using MatrixType = Eigen::SparseMatrix<double>;
+    typedef Scalar_ Scalar;
+    typedef Eigen::Matrix<Scalar, Eigen::Dynamic, 1> Vector;
 
-    Eigen::VectorXd solve(const Eigen::VectorXd &rhs) const
+public:
+    using MatrixType = Eigen::SparseMatrix<Scalar>;
+
+    enum
     {
-        return preconditioner * rhs;
+        ColsAtCompileTime = Eigen::Dynamic,
+        MaxColsAtCompileTime = Eigen::Dynamic
+    };
+
+    EIGEN_CONSTEXPR Eigen::Index rows() const EIGEN_NOEXCEPT { return preconditioner.rows(); }
+    EIGEN_CONSTEXPR Eigen::Index cols() const EIGEN_NOEXCEPT { return preconditioner.cols(); }
+
+    typedef typename Vector::StorageIndex StorageIndex;
+    template <typename Rhs, typename Dest>
+    void _solve_impl(const Rhs &b, Dest &x) const
+    {
+        x  = preconditioner * b;
+    }
+
+    
+    template<typename Rhs> inline const Eigen::Solve<ASMPreconditioner, Rhs> solve(const Rhs &b) const
+    {
+        return Eigen::Solve<ASMPreconditioner, Rhs>(*this, b.derived());
     }
 
     Eigen::ComputationInfo info() const
@@ -91,7 +113,8 @@ public:
         for (int i = 0; i < operators.size(); ++i)
         {
             MatrixType localA = operators[i].R * A * operators[i].E;
-            Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper> solver;
+            localA.makeCompressed();
+            Eigen::ConjugateGradient<Eigen::SparseMatrix<Scalar>, Eigen::Lower | Eigen::Upper> solver;
             solver.compute(localA);
             MatrixType identity(localA.rows(), localA.cols());
             identity.setIdentity();
@@ -102,17 +125,29 @@ public:
                 preconditioner += operators[i].E * localInverse * operators[i].R;
             }
         }
-        preconditioner.makeCompressed();
         std::cout << "finished computing preconditioner" << std::endl;
-        std::cout << (double)preconditioner.nonZeros() / preconditioner.rows() * preconditioner.cols() << " percent of the preconditioner is non-zero" << std::endl;
-        
+        std::cout << (double)preconditioner.nonZeros() / (preconditioner.rows() * preconditioner.cols()) * 100
+                  << " percent of the preconditioner is non-zero" << std::endl;
+        preconditioner.makeCompressed();
         preconditioner_computed = true;
+
+
+    //       m_invdiag.resize(A.cols());
+    //    for(int j=0; j<A.outerSize(); ++j)
+    //    {
+    //      typename MatrixType::InnerIterator it(A,j);
+    //      while(it && it.index()!=j) ++it;
+    //      if(it && it.index()==j && it.value()!=Scalar(0))
+    //        m_invdiag(j) = Scalar(1)/it.value();
+    //      else
+    //        m_invdiag(j) = Scalar(1);
+    //    }
     }
 
 private:
     std::vector<PartitionOperators> operators; // restriction and extension operators for each partition
     bool preconditioner_computed = false;
-    Eigen::SparseMatrix<double> preconditioner;
+    Eigen::SparseMatrix<Scalar> preconditioner;
 };
 
 namespace fs = std::filesystem;
@@ -188,6 +223,8 @@ int main(int argc, char **argv)
     timer.new_activity("calculate preconditioner");
     timer.new_activity("solve");
     timer.new_activity("build stiffness and mass matrices");
+
+    timer.print_on_exit(true);
 
     // Load geometric data
     Eigen::MatrixXd surfaceV, V; // Vertices
@@ -273,38 +310,43 @@ int main(int argc, char **argv)
 
     for (int v = 0; v < Nv; v++)
     {
-        c(v) = V.coeff(v, 0) > 0.1;
+        c(v) = (V.coeff(v, 0) > 0.1) * 3;
     }
-
+    double min_c = c.minCoeff(), max_c = c.maxCoeff();
     Eigen::SparseMatrix<double> A = M + args.timestep * args.alpha * K;
 
-    std::cout << "Decomposing domain" << std::endl;
-    auto operators = overlapping_decomposition(T, V.rows(), args.num_partitions, args.num_overlap_layers);
-
-    Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper, ASMPreconditioner> solver_asm;
+    Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper, ASMPreconditioner<double>> solver_asm;
     Eigen::ConjugateGradient<Eigen::SparseMatrix<double>, Eigen::Lower | Eigen::Upper> solver;
 
     if (args.usePreconditioner)
     {
+        std::cout << "Decomposing domain" << std::endl;
+        auto operators = overlapping_decomposition(T, V.rows(), args.num_partitions, args.num_overlap_layers);
+        for (int i = 0; i < operators.size(); ++i)
+        {
+            std::cout << "Partition " << i << " has " << operators[i].R.rows() << " elements" << std::endl;
+        }
         std::cout << "Computing preconditioner with " << operators.size() << " subdomains" << std::endl;
         solver_asm.preconditioner().loadPartitions(std::move(operators));
         timer.start(0);
         solver_asm.compute(A);
         timer.stop();
     }
-
-    solver.compute(A);
+    else
+    {
+        solver.compute(A);
+    }
 
     std::cout << "Solving system" << std::endl;
 
-    timer.print_on_exit(true);
     for (int step = 0; step < args.num_steps; ++step)
     {
+        std::cout << "min c: " << c.minCoeff() << " max c: " << c.maxCoeff() << std::endl;
 
         // Save result to a PNG
         if (args.renderImages)
         {
-            er.set_data(c);
+            er.set_data(c, min_c, max_c, igl::COLOR_MAP_TYPE_VIRIDIS);
             er.render_buffer(buffer_R, buffer_G, buffer_B, buffer_A);
             std::ostringstream ss;
             ss << "result/" << step << ".png";
@@ -314,18 +356,21 @@ int main(int argc, char **argv)
         // solve the system for the next timestep
         Eigen::VectorXd b = M * c;
         timer.start(1);
+        int lastIterations = -1;
         if (args.usePreconditioner)
         {
-            c = solver_asm.solveWithGuess(b, c);
+            c = solver_asm.solve(b);
+            lastIterations = solver_asm.iterations();
         }
         else
         {
-            c = solver.solveWithGuess(b, c);
+            c = solver.solve(b);
+            lastIterations = solver.iterations();
         }
         timer.stop();
 
-        std::cout << step << std::endl
-                  << "iterations: " << solver.iterations() << std::endl;
+        std::cout << "time step: " << step
+                  << " iterations: " << lastIterations << std::endl;
     }
     return 0;
 }

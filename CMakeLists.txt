@@ -1,7 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
-project(3d_fem)
-set(CMAKE_CXX_STANDARD 17)
 list(PREPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+
+project(3d_fem)
+
+set(CMAKE_CXX_STANDARD 17)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Debug)
+endif()
 
 # Libigl
 include(libigl)
@@ -57,3 +62,5 @@ target_link_libraries(${PROJECT_NAME} PUBLIC OpenMP::OpenMP_CXX)
 
 include(cli11)
 target_link_libraries(${PROJECT_NAME} PUBLIC CLI11::CLI11)
+
+add_compile_options(-O3)

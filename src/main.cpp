@@ -22,10 +22,13 @@ struct CLIArgs
     int num_partitions; // default is based on number of processors
     int num_overlap_layers = 1;
     int num_steps = 50;
+
     double timestep = 0.1;
     double alpha = 1.0;
+
     bool usePreconditioner = false;
     bool renderImages = false;
+    int num_threads;
     CLIArgs(int argc, char *argv[])
     {
         CLI::App app{"3D FEM Solver with (optional) ASM Preconditioner"};
@@ -52,6 +55,9 @@ struct CLIArgs
         app.add_flag("-r,--render", renderImages,
                      "render images of the simulation at each time step")
             ->default_val(renderImages);
+
+        app.add_option("--threads", num_threads, "max number of threads to use")
+            ->default_val(omp_get_num_procs());
 
         try
         {
@@ -109,17 +115,17 @@ public:
     {
         preconditioner.resize(A.rows(), A.cols());
         preconditioner.setZero();
-#pragma omp parallel for
+        #pragma omp parallel for
         for (int i = 0; i < operators.size(); ++i)
         {
             MatrixType localA = operators[i].R * A * operators[i].E;
             localA.makeCompressed();
-            Eigen::ConjugateGradient<Eigen::SparseMatrix<Scalar>, Eigen::Lower | Eigen::Upper> solver;
+            Eigen::SimplicialLDLT<MatrixType> solver(localA);
             solver.compute(localA);
             MatrixType identity(localA.rows(), localA.cols());
             identity.setIdentity();
             MatrixType localInverse = solver.solve(identity);
-#pragma omp critical
+            #pragma omp critical
             {
                 std::cout << "Computed preconditioner for partition " << i << std::endl;
                 preconditioner += operators[i].E * localInverse * operators[i].R;
@@ -218,7 +224,7 @@ double tetrahedron_volume(const Eigen::Vector3d &X0, const Eigen::Vector3d &X1, 
 int main(int argc, char **argv)
 {
     CLIArgs args = CLIArgs(argc, argv);
-
+    omp_set_num_threads(args.num_threads);
     Timer timer;
     timer.new_activity("calculate preconditioner");
     timer.new_activity("solve");
@@ -245,11 +251,11 @@ int main(int argc, char **argv)
     Eigen::SparseMatrix<double> K(Nv, Nv);
     Eigen::SparseMatrix<double> M(Nv, Nv);
     timer.start(2);
-#pragma omp parallel
+    #pragma omp parallel
     {
         Eigen::SparseMatrix<double> K_local(Nv, Nv);
         Eigen::SparseMatrix<double> M_local(Nv, Nv);
-#pragma omp for
+        #pragma omp for
         for (int tet_idx = 0; tet_idx < Ne; ++tet_idx)
         {
             Eigen::Matrix<double, 4, 4> Ke, Me;
@@ -272,7 +278,7 @@ int main(int argc, char **argv)
                 }
             }
         }
-#pragma omp critical
+        #pragma omp critical
         {
             K += K_local;
             M += M_local;

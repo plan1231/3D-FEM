@@ -17,6 +17,8 @@
 #include "domain_partitioning.h"
 #include "readTetMesh.h"
 
+typedef Eigen::Triplet<double> Triplet;
+
 struct CLIArgs
 {
     int num_partitions; // default is based on number of processors
@@ -225,7 +227,7 @@ int main(int argc, char **argv)
     Timer timer;
     timer.new_activity("calculate preconditioner");
     timer.new_activity("solve");
-    timer.new_activity("build stiffness and mass matrices");
+    timer.new_activity("assemble stiffness and mass matrices");
 
     timer.print_on_exit(true);
 
@@ -239,45 +241,52 @@ int main(int argc, char **argv)
     int Nv = TV.rows(); // Number of vertices
     int Ne = TT.rows(); // Number of elements
 
-    std::cout << "building stiffness and mass matrices" << std::endl;
-    Eigen::SparseMatrix<double> K(Nv, Nv);
-    Eigen::SparseMatrix<double> M(Nv, Nv);
+    std::cout << "Assembling stiffness and mass matrices" << std::endl;
+
+
+    std::vector<std::vector<Eigen::Triplet<double>>> K_triplets(omp_get_max_threads());
+    std::vector<std::vector<Eigen::Triplet<double>>> M_triplets(omp_get_max_threads());
+
     timer.start(2);
-    #pragma omp parallel
+    #pragma omp parallel for
+    for (int tet_idx = 0; tet_idx < Ne; ++tet_idx)
     {
-        Eigen::SparseMatrix<double> K_local(Nv, Nv);
-        Eigen::SparseMatrix<double> M_local(Nv, Nv);
-        #pragma omp for
-        for (int tet_idx = 0; tet_idx < Ne; ++tet_idx)
+        Eigen::Matrix<double, 4, 4> Ke, Me;
+
+        double volume = tetrahedron_volume(TV.row(TT(tet_idx, 0)), TV.row(TT(tet_idx, 1)),
+                                            TV.row(TT(tet_idx, 2)), TV.row(TT(tet_idx, 3)));
+
+        auto indices = TT.row(tet_idx);
+
+        tetrahedron_stiffness(Ke, volume, indices, TV);
+        tetrahedron_mass(Me, volume);
+
+        for (int ti = 0; ti < 4; ++ti)
         {
-            Eigen::Matrix<double, 4, 4> Ke, Me;
 
-            double volume = tetrahedron_volume(TV.row(TT(tet_idx, 0)), TV.row(TT(tet_idx, 1)),
-                                               TV.row(TT(tet_idx, 2)), TV.row(TT(tet_idx, 3)));
-
-            auto indices = TT.row(tet_idx);
-
-            tetrahedron_stiffness(Ke, volume, indices, TV);
-            tetrahedron_mass(Me, volume);
-
-            for (int ti = 0; ti < 4; ++ti)
+            for (int tj = 0; tj < 4; ++tj)
             {
-
-                for (int tj = 0; tj < 4; ++tj)
-                {
-                    K_local.coeffRef(indices(ti), indices(tj)) += Ke.coeff(ti, tj);
-                    M_local.coeffRef(indices(ti), indices(tj)) += Me.coeff(ti, tj);
-                }
+                K_triplets[omp_get_thread_num()].push_back(Triplet(indices(ti), indices(tj), Ke.coeff(ti, tj)));
+                M_triplets[omp_get_thread_num()].push_back(Triplet(indices(ti), indices(tj), Me.coeff(ti, tj)));
             }
         }
-        #pragma omp critical
-        {
-            K += K_local;
-            M += M_local;
-        }
     }
+    std::vector<Eigen::Triplet<double>> K_triplets_merged;
+    std::vector<Eigen::Triplet<double>> M_triplets_merged;
+    for (int i = 0; i < K_triplets.size(); ++i)
+    {
+        K_triplets_merged.insert(K_triplets_merged.end(), K_triplets[i].begin(), K_triplets[i].end());
+        M_triplets_merged.insert(M_triplets_merged.end(), M_triplets[i].begin(), M_triplets[i].end());
+    }
+    Eigen::SparseMatrix<double> K(Nv, Nv);
+    Eigen::SparseMatrix<double> M(Nv, Nv);
+
+    K.setFromTriplets(K_triplets_merged.begin(), K_triplets_merged.end());
+    M.setFromTriplets(M_triplets_merged.begin(), M_triplets_merged.end());
+
     K.makeCompressed();
     M.makeCompressed();
+
     timer.stop();
 
     igl::embree::EmbreeRenderer er;
